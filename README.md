@@ -81,7 +81,7 @@ Output:
 ### Custom Formatting
 
 ```swift
-let customOptions = SwiftJSONSanitizer.Options(indent: "    ", newLine: "\n", separator: " ")
+let customOptions = SwiftJSONSanitizer.Options(indentChar: "    ", newLineChar: "\n", valueSeparationChar: " ")
 let customFormattedJSON = SwiftJSONSanitizer.sanitize(malformedJSON, options: customOptions)
 print(customFormattedJSON)
 ```
