@@ -23,15 +23,15 @@ final class SwiftJSONSanitizerTests: XCTestCase {
     XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
   }
   
-  func testMissingBrace() {
-    let input = "{\"key\": [1, 2, 3]}"
+  func testNullValue() {
+    let input = """
+        {
+          "key": null
+        }
+        """
     let expected = """
         {
-          "key": [
-            1,
-            2,
-            3
-          ]
+          "key": null
         }
         """
     XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
@@ -428,6 +428,22 @@ final class SwiftJSONSanitizerTests: XCTestCase {
     XCTAssertEqual(SwiftJSONSanitizer.sanitize(input, options: .minify), expected)
   }
   
+  func testMissingBody() {
+    let input = """
+    {
+    "body":<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN""http://www.w3.org/TR/html4/strict.dtd"></HTML>HTTP Error 404, The requested resource is not found</HTML> 
+    }
+    """
+    
+    let expected = """
+    {
+    "body": null
+    }
+    """
+    
+    XCTAssertEqual(SwiftJSONSanitizer.sanitize(input, options: .minify), SwiftJSONSanitizer.sanitize(expected, options: .minify))
+  }
+  
 //  func testLargeJSONPerformance() {
 //    let largeInput = generateLargeJSON(depth: 5, breadth: 10)
 //    
@@ -437,6 +453,25 @@ final class SwiftJSONSanitizerTests: XCTestCase {
 //      XCTAssertTrue(result.hasSuffix("}"), "Sanitized output should end with '}'")
 //    }
 //  }
+  
+  func testPeekString() {
+    let trueStr = "True"
+    let falseStr = "FAlsE"
+    
+    XCTAssertTrue(trueStr.peek(aheadFrom: 0, match: "true"))
+    XCTAssertTrue(trueStr.peek(aheadFrom: 1, match: "RUE"))
+    XCTAssertFalse(trueStr.peek(aheadFrom: -1, match: ""))
+    XCTAssertFalse(trueStr.peek(aheadFrom: 1000, match: ""))
+    XCTAssertTrue(falseStr.peek(aheadFrom: 0, match: "False"))
+  }
+  
+  func testPeekNumber() {
+    let invalidNum = "1333.2/"
+    let validNum = "1,2,3"
+    
+    XCTAssertEqual(invalidNum.peekNumber(aheadFrom: 0), 1333.2)
+    XCTAssertEqual(validNum.peekNumber(aheadFrom: 0), 1)
+  }
 }
 
 
