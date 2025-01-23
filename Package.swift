@@ -15,17 +15,13 @@ let package = Package(
       type: .dynamic,
       targets: ["SwiftJSONSanitizer"]
     ),
-    .library(
-      name: "SwiftJSONSanitizer",
-      targets: ["SwiftJSONSanitizer"]
-    ),
   ],
   targets: [
     .target(
       name: "SwiftJSONSanitizer",
       dependencies: [],
       linkerSettings: [
-        .unsafeFlags(["-Wl,-make_mergeable"])
+        
       ]),
     .testTarget(
       name: "SwiftJSONSanitizerTests",
