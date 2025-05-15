@@ -251,6 +251,32 @@ final class SwiftJSONSanitizerTests: XCTestCase {
     XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
   }
   
+	func testMissingEndQuote() {
+		let input = "{\"key\": \"string with no end quote"
+		let expected = """
+			{
+			  "key": "string with no end quote"
+			}
+			"""
+
+		XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
+	}
+	
+	func testMissingEndQuoteInArray() {
+		let input = "{\"key\": [\"string with an end quote\", \"string with no end quote"
+		let expected = """
+			{
+			  "key": [
+			    "string with an end quote",
+			    "string with no end quote"
+			  ]
+			}
+			"""
+		let result = SwiftJSONSanitizer.sanitize(input)
+		print(result)
+		XCTAssertEqual(result, expected)
+	}
+	
   func testEscapedQuotesInString() {
     let input = "{\"key\": \"string with \\\"quotes\\\"\"}"
     let expected = """
