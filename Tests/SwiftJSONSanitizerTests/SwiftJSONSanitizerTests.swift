@@ -8,7 +8,6 @@ import Foundation
 @testable import SwiftJSONSanitizer
 
 final class SwiftJSONSanitizerTests: XCTestCase {
-  
   func testValidJSON() {
     let input = "{\"key\": [11, 12, 13]}"
     let expected = """
@@ -251,32 +250,57 @@ final class SwiftJSONSanitizerTests: XCTestCase {
     XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
   }
   
-	func testMissingEndQuote() {
-		let input = "{\"key\": \"string with no end quote"
-		let expected = """
-			{
-			  "key": "string with no end quote"
-			}
-			"""
+  func testMissingEndQuote() {
+    let input = "{\"key\": \"string with no end quote"
+    let expected = """
+    {
+      "key": "string with no end quote"
+    }
+    """
+    
+    XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
+  }
+  
+  func testMissingEndQuoteInArray() {
+    let input = "{\"key\": [\"string with an end quote\", \"string with no end quote"
+    let expected = """
+    {
+      "key": [
+        "string with an end quote",
+        "string with no end quote"
+      ]
+    }
+    """
+    let result = SwiftJSONSanitizer.sanitize(input)
+    XCTAssertEqual(result, expected)
+  }
+  
+  func testCommaInString() {
+    let input = """
+    {"description":"This, and that
+    """
+    
+    let expected = """
+   {
+     "description": "This, and that"
+   }
+   """
+    XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
+  }
+  
+  func testBracketsAndBracesInString() {
+    let input = """
+    {"description":"This, {and} [that
+    """
+    
+    let expected = """
+    {
+      "description": "This, {and} [that"
+    }
+    """
+    XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
+  }
 
-		XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
-	}
-	
-	func testMissingEndQuoteInArray() {
-		let input = "{\"key\": [\"string with an end quote\", \"string with no end quote"
-		let expected = """
-			{
-			  "key": [
-			    "string with an end quote",
-			    "string with no end quote"
-			  ]
-			}
-			"""
-		let result = SwiftJSONSanitizer.sanitize(input)
-		print(result)
-		XCTAssertEqual(result, expected)
-	}
-	
   func testEscapedQuotesInString() {
     let input = "{\"key\": \"string with \\\"quotes\\\"\"}"
     let expected = """
