@@ -444,15 +444,45 @@ final class SwiftJSONSanitizerTests: XCTestCase {
     XCTAssertEqual(SwiftJSONSanitizer.sanitize(input, options: .minify), SwiftJSONSanitizer.sanitize(expected, options: .minify))
   }
   
-//  func testLargeJSONPerformance() {
-//    let largeInput = generateLargeJSON(depth: 5, breadth: 10)
-//    
-//    measure {
-//      let result = SwiftJSONSanitizer.sanitize(largeInput, options: .minify)
-//      XCTAssertTrue(result.starts(with: "{"), "Sanitized output should start with '{'")
-//      XCTAssertTrue(result.hasSuffix("}"), "Sanitized output should end with '}'")
-//    }
-//  }
+  func testLargeJSONPerformance() {
+    let largeInput = generateLargeJSON(depth: 5, breadth: 10)
+    
+    measure {
+      let result = SwiftJSONSanitizer.sanitize(largeInput, options: .minify)
+      XCTAssertTrue(result.starts(with: "{"), "Sanitized output should start with '{'")
+      XCTAssertTrue(result.hasSuffix("}"), "Sanitized output should end with '}'")
+    }
+  }
+
+  func testMalformedJSONPerformance() {
+    let malformedInput = generateMalformedJSON(depth: 4, breadth: 8)
+    
+    measure {
+      let result = SwiftJSONSanitizer.sanitize(malformedInput, options: .minify)
+      XCTAssertTrue(result.starts(with: "{"), "Sanitized output should start with '{'")
+      XCTAssertTrue(result.hasSuffix("}"), "Sanitized output should end with '}'")
+    }
+  }
+
+  func testDeeplyNestedJSONPerformance() {
+    let deepInput = generateDeeplyNestedJSON(depth: 20)
+    
+    measure {
+      let result = SwiftJSONSanitizer.sanitize(deepInput, options: .prettyPrint)
+      XCTAssertTrue(result.starts(with: "{"), "Sanitized output should start with '{'")
+      XCTAssertTrue(result.hasSuffix("}"), "Sanitized output should end with '}'")
+    }
+  }
+
+  func testLargeArrayPerformance() {
+    let arrayInput = generateLargeArray(size: 10000)
+    
+    measure {
+      let result = SwiftJSONSanitizer.sanitize(arrayInput, options: .minify)
+      XCTAssertTrue(result.starts(with: "["), "Sanitized output should start with '['")
+      XCTAssertTrue(result.hasSuffix("]"), "Sanitized output should end with ']'")
+    }
+  }
   
   func testPeekString() {
     let trueStr = "True"
@@ -495,5 +525,69 @@ extension SwiftJSONSanitizerTests {
     }
     
     return generateObject(depth)
+  }
+  
+  private func generateMalformedJSON(depth: Int, breadth: Int) -> String {
+    func generateObject(_ currentDepth: Int) -> String {
+      if currentDepth == 0 {
+        return "{\"leaf\":\"value\"" // Missing closing brace
+      }
+      
+      var object = "{"
+      for i in 0..<breadth {
+        object += "\"key\(i)\":"
+        if i % 3 == 0 {
+          object += "[1,2,3" // Missing closing bracket
+        } else if i % 3 == 1 {
+          object += generateObject(currentDepth - 1)
+        } else {
+          object += "\"string_value\","
+        }
+        if i < breadth - 1 && i % 2 == 0 {
+          object += ","
+        }
+      }
+      // Randomly omit closing brace
+      if currentDepth % 2 == 0 {
+        object += "}"
+      }
+      return object
+    }
+    
+    return generateObject(depth)
+  }
+  
+  private func generateDeeplyNestedJSON(depth: Int) -> String {
+    var json = "{"
+    for i in 0..<depth {
+      json += "\"level\(i)\": {"
+    }
+    json += "\"deepest\": \"value\""
+    // Only close half the braces to make it malformed
+    for _ in 0..<(depth / 2) {
+      json += "}"
+    }
+    return json
+  }
+  
+  private func generateLargeArray(size: Int) -> String {
+    var json = "["
+    for i in 0..<size {
+      if i % 4 == 0 {
+        json += "{\"index\":\(i),\"value\":\"string_\(i)\"}"
+      } else if i % 4 == 1 {
+        json += "\(i)"
+      } else if i % 4 == 2 {
+        json += "true"
+      } else {
+        json += "null"
+      }
+      
+      if i < size - 1 {
+        json += ","
+      }
+    }
+    // Make it malformed by omitting closing bracket
+    return json
   }
 }
