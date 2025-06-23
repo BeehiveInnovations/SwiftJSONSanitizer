@@ -558,6 +558,11 @@ public struct SwiftJSONSanitizer {
       
       switch char {
         case ExpectedType.objectStart.char():
+		  if expectedTypes.contains(.valueStringEnd) {
+			  formatted.append(char)
+			  break
+		  }
+
           if !openedStructures.isEmpty, indentLevel > 0, !expectedTypes.contains(.arrayStart) {
             removeTrailingComma(&formatted)
             
@@ -573,7 +578,12 @@ public struct SwiftJSONSanitizer {
           expectedTypes = [.keyStart, .objectEnd]
           
         case ExpectedType.arrayStart.char():
-          if !openedStructures.isEmpty, indentLevel > 0, !expectedTypes.contains(.arrayStart) {
+		  if expectedTypes.contains(.valueStringEnd) {
+			  formatted.append(char)
+			  break
+		  }
+		  
+		  if !openedStructures.isEmpty, indentLevel > 0, !expectedTypes.contains(.arrayStart) {
             removeTrailingComma(&formatted)
             
             // Close any open structures if necessary
@@ -598,6 +608,11 @@ public struct SwiftJSONSanitizer {
             .arrayEnd
           ]
         case ExpectedType.objectEnd.char():
+		  if expectedTypes.contains(.valueStringEnd) {
+			  formatted.append(char)
+			  break
+		  }
+
           if expectedTypes.contains(.objectEnd) {
             removeTrailingComma(&formatted)
 
@@ -615,6 +630,11 @@ public struct SwiftJSONSanitizer {
           }
           
         case ExpectedType.arrayEnd.char():
+		  if expectedTypes.contains(.valueStringEnd) {
+			  formatted.append(char)
+			  break
+		  }
+
           if expectedTypes.contains(.arrayEnd) {
             removeTrailingComma(&formatted)
 
@@ -644,6 +664,7 @@ public struct SwiftJSONSanitizer {
           }
           else if expectedTypes.contains(.valueStringStart) {
             formatted.append(char)
+            openedStructures.append(char)
 
             // Found start of string, expect it to end
             expectedTypes = [.valueStringEnd]
@@ -657,6 +678,7 @@ public struct SwiftJSONSanitizer {
             }
             else {
               // Expect a comma for more strings in an array, or a } or ]
+			  openedStructures.removeLast()
               expectedTypes = [.comma, .objectEnd, .arrayEnd]
             }
           }
@@ -666,6 +688,11 @@ public struct SwiftJSONSanitizer {
             expectedTypes = [.keyEnd]
           }
         case ExpectedType.colon.char():
+		  if expectedTypes.contains(.valueStringEnd) {
+			  formatted.append(char)
+			  break
+		  }
+
           if expectedTypes.contains(.colon) {
             formatted.append(ExpectedType.colon.char())
             formatted.append(options.valueSeparationChar)
@@ -682,7 +709,12 @@ public struct SwiftJSONSanitizer {
             ]
           }
         case ExpectedType.comma.char():
-          if expectedTypes.contains(.comma), !expectedTypes.contains(.valueStringEnd) {
+		  if expectedTypes.contains(.valueStringEnd) {
+			  formatted.append(char)
+			  break
+		  }
+
+          if expectedTypes.contains(.comma) {
             if valueBeingIgnored {
               valueBeingIgnored.toggle()
             }
@@ -907,6 +939,13 @@ extension SwiftJSONSanitizer {
     formatted.append(bracket)
   }
   
+  /// Processes a closing string
+  /// - Parameters:
+  ///   - formatted: The StringBuilder to append the formatted string
+  private static func processCloseString(_ formatted: inout StringBuilder) {
+    formatted.append(ExpectedType.valueStringEnd.char())
+  }
+
   /// Processes a comma
   /// - Parameters:
   ///   - indentLevel: The current indentation level
@@ -940,8 +979,12 @@ extension SwiftJSONSanitizer {
     var closedCount = 0
     while !openedStructures.isEmpty, indentLevel > 0, closedCount < limit {
       let lastOpen = openedStructures.removeLast()
-      let closingBracket: Character = lastOpen == ExpectedType.objectStart.char() ? ExpectedType.objectEnd.char() : ExpectedType.arrayEnd.char()
-      processCloseBracket(closingBracket, &indentLevel, options, &formatted)
+      if lastOpen == ExpectedType.valueStringStart.char() {
+        processCloseString(&formatted)
+      } else {
+        let closingBracket: Character = lastOpen == ExpectedType.objectStart.char() ? ExpectedType.objectEnd.char() : ExpectedType.arrayEnd.char()
+        processCloseBracket(closingBracket, &indentLevel, options, &formatted)
+      }
       closedCount += 1
     }
     
