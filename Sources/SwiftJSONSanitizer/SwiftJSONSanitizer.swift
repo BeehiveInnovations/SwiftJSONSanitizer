@@ -258,6 +258,27 @@ public struct SwiftJSONSanitizer {
     while currentIndex < bytes.count {
       let byte = bytes[currentIndex]
       
+      // If we're inside a string, only look for quotes and escape sequences
+      if expectedTypes.contains(.valueStringEnd) || expectedTypes.contains(.keyEnd) {
+        if byte == 0x22 && !escaping { // '"' and not escaped
+          outputBuffer.append(byte)
+          if expectedTypes.contains(.keyEnd) {
+            expectedTypes = [.colon]
+          } else {
+            expectedTypes = [.comma, .objectEnd, .arrayEnd]
+          }
+        } else {
+          outputBuffer.append(byte)
+          if escaping {
+            escaping = false
+          } else if byte == 0x5C { // '\'
+            escaping = true
+          }
+        }
+        currentIndex += 1
+        continue
+      }
+      
       switch byte {
         case 0x7B: // '{'
           if !openedStructures.isEmpty, indentLevel > 0, !expectedTypes.contains(.arrayStart) {
@@ -326,33 +347,12 @@ public struct SwiftJSONSanitizer {
           }
           
         case 0x22: // '"'
-          if expectedTypes.contains(.keyEnd) {
+          if expectedTypes.contains(.valueStringStart) {
             outputBuffer.append(byte)
-
-            if escaping {
-              // this quote is being escaped, we haven't ended yet
-              escaping = false
-            } else {
-              expectedTypes = [.colon]
-            }
-          } else if expectedTypes.contains(.valueStringStart) {
-            outputBuffer.append(byte)
-
             // Found start of string, expect it to end
             expectedTypes = [.valueStringEnd]
-          } else if expectedTypes.contains(.valueStringEnd) {
-            outputBuffer.append(byte)
-
-            if escaping {
-              // quote within the value is being escaped, we haven't ended yet
-              escaping = false
-            } else {
-              // Expect a comma for more strings in an array, or a } or ]
-              expectedTypes = [.comma, .objectEnd, .arrayEnd]
-            }
           } else if !openedStructures.isEmpty, openedStructures.last == 0x7B, expectedTypes.contains(.keyStart) { // '{'
             outputBuffer.append(byte)
-
             expectedTypes = [.keyEnd]
           }
           
@@ -386,16 +386,7 @@ public struct SwiftJSONSanitizer {
           // Handle unknown characters, could be accumulating a string or looking
           // to start a new structure
           
-          if expectedTypes.contains(.keyEnd) || expectedTypes.contains(.valueStringEnd) {
-            // accumulating a string, expecting to end eventually
-            outputBuffer.append(byte)
-            
-            if escaping {
-              escaping = false
-            } else if byte == 0x5C { // '\'
-              escaping = true
-            }
-          } else if !isWhitespace(byte) {
+          if !isWhitespace(byte) {
             // When we're here, we're not accumulating characters for a string (key or value)
             // and we haven't encountered any of the known object structures
             
@@ -464,6 +455,11 @@ public struct SwiftJSONSanitizer {
       }
       
       currentIndex += 1
+    }
+    
+    // If we're still expecting a string end, close the string
+    if expectedTypes.contains(.valueStringEnd) || expectedTypes.contains(.keyEnd) {
+      outputBuffer.append(0x22) // '"'
     }
     
     // Close any remaining open structures
