@@ -7,32 +7,28 @@
 
 /// A more efficient string builder for constructing large strings
 struct StringBuilder {
-  private var buffer: [Character]
-  private var stringCache: String?
+  private var buffer: String
   
   init(capacity: Int = 256) {
-    self.buffer = []
+    self.buffer = ""
     self.buffer.reserveCapacity(capacity)
   }
   
   mutating func append(_ character: Character) {
     buffer.append(character)
-    stringCache = nil
   }
   
   mutating func append(_ string: String) {
-    buffer.append(contentsOf: string)
-    stringCache = nil
+    buffer.append(string)
   }
   
   mutating func remove(at index: Int) {
-    buffer.remove(at: index)
-    stringCache = nil
+    let idx = buffer.index(buffer.startIndex, offsetBy: index)
+    buffer.remove(at: idx)
   }
   
   mutating func removeLast() {
     buffer.removeLast()
-    stringCache = nil
   }
   
   var last: Character? {
@@ -40,19 +36,18 @@ struct StringBuilder {
   }
   
   func lastIndex(where predicate: (Character) -> Bool) -> Int? {
-    buffer.lastIndex(where: predicate)
+    if let idx = buffer.lastIndex(where: predicate) {
+      return buffer.distance(from: buffer.startIndex, to: idx)
+    }
+    return nil
   }
   
   subscript(index: Int) -> Character {
-    buffer[index]
+    let idx = buffer.index(buffer.startIndex, offsetBy: index)
+    return buffer[idx]
   }
   
-  mutating func toString() -> String {
-    if let cached = stringCache {
-      return cached
-    }
-    let result = String(buffer)
-    stringCache = result
-    return result
+  func toString() -> String {
+    return buffer
   }
 }

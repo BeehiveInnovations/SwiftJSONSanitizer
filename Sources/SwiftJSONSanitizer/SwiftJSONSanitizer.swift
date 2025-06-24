@@ -174,11 +174,320 @@ public struct SwiftJSONSanitizer {
   ///   - options: Formatting options (default is .prettyPrint)
   /// - Returns: A sanitized and formatted JSON string
   public static func sanitize(_ json: String, options: Options = .prettyPrint) -> String {
-    // Use optimized UTF-8 byte processing for better performance
-    let utf8Bytes = Array(json.utf8)
-    return sanitizeBytes(utf8Bytes, options: options)
+    // Zero-copy UTF-8 processing
+    var mutableJson = json
+    return mutableJson.withUTF8 { buffer in
+      sanitizeBytesUnsafe(buffer, options: options)
+    }
   }
 
+  /// Zero-copy sanitization using UnsafeBufferPointer
+  private static func sanitizeBytesUnsafe(_ bytes: UnsafeBufferPointer<UInt8>, options: Options) -> String {
+    var outputBuffer = ContiguousArray<UInt8>()
+    outputBuffer.reserveCapacity(bytes.count + (bytes.count / 2)) // Reserve extra space for formatting
+    
+    var indentLevel = 0
+    var currentIndex = 0
+    
+    /// Flag set when we're escaping an encountered `\` character within a key / value
+    var escaping = false
+    
+    /// Flag set when we've encountered a key and are now looking for a valid value type
+    var valueWillStart = false
+    /// Flag set when a value is being ignored as bogus
+    var valueBeingIgnored = false
+    
+    var expectedTypes: ExpectedTokens = [.objectStart, .arrayStart]
+    var openedStructures = [UInt8]()
+    
+    // Convert options to UTF-8 bytes for faster processing
+    let indentBytes = Array(options.indentChar.utf8)
+    let newLineBytes = Array(options.newLineChar.utf8)
+    let valueSeparationBytes = Array(options.valueSeparationChar.utf8)
+    
+    // Create indentation cache for performance
+    let indentCache = IndentationCache(indentBytes: indentBytes, newLineBytes: newLineBytes)
+    
+    // Skip leading whitespace
+    while currentIndex < bytes.count && isWhitespace(bytes[currentIndex]) {
+      currentIndex += 1
+    }
+    
+    // Check if the JSON starts with a valid JSON opening character
+    let isValidJsonStart: Bool
+    let startingStructure: UInt8
+    
+    if currentIndex < bytes.count {
+      let firstNonWhitespace = bytes[currentIndex]
+      if firstNonWhitespace == 0x7B || firstNonWhitespace == 0x5B { // '{' or '['
+        isValidJsonStart = true
+        startingStructure = firstNonWhitespace
+      } else {
+        // Determine the starting structure (object or array)
+        var firstRelevantIndex = currentIndex
+        while firstRelevantIndex < bytes.count {
+          let byte = bytes[firstRelevantIndex]
+          if byte == 0x7D || byte == 0x5D { // '}' or ']'
+            break
+          }
+          firstRelevantIndex += 1
+        }
+        
+        let firstRelevantByte = firstRelevantIndex < bytes.count ? bytes[firstRelevantIndex] : 0x7D
+        startingStructure = firstRelevantByte == 0x7D ? 0x7B : 0x5B // '{' or '['
+        
+        isValidJsonStart = false
+      }
+    } else {
+      isValidJsonStart = false
+      startingStructure = 0x7B // '{'
+    }
+    
+    if !isValidJsonStart {
+      // Prepend with an opening brace or bracket if the JSON does not start with a valid opening character
+      processOpenBracketBytes(startingStructure, &indentLevel, indentCache, &outputBuffer)
+      openedStructures.append(startingStructure)
+      
+      if startingStructure == 0x7B { // '{'
+        expectedTypes = [.keyStart, .objectEnd]
+      } else if startingStructure == 0x5B { // '['
+        expectedTypes = [.keyStart, .arrayEnd]
+      } else {
+        valueWillStart = true
+        expectedTypes = [.valueStringStart, .valueNumber, .valueBoolean, .valueNull, .objectStart, .arrayStart, .arrayEnd]
+      }
+    }
+    
+    while currentIndex < bytes.count {
+      let byte = bytes[currentIndex]
+      
+      // If we're inside a string, only look for quotes and escape sequences
+      if expectedTypes.contains(.valueStringEnd) || expectedTypes.contains(.keyEnd) {
+        if byte == 0x22 && !escaping { // '"' and not escaped
+          outputBuffer.append(byte)
+          if expectedTypes.contains(.keyEnd) {
+            expectedTypes = [.colon]
+          } else {
+            expectedTypes = [.comma, .objectEnd, .arrayEnd]
+          }
+        } else {
+          outputBuffer.append(byte)
+          if escaping {
+            escaping = false
+          } else if byte == 0x5C { // '\'
+            escaping = true
+          }
+        }
+        currentIndex += 1
+        continue
+      }
+      
+      switch byte {
+        case 0x7B: // '{'
+          if !openedStructures.isEmpty, indentLevel > 0, !expectedTypes.contains(.arrayStart) {
+            removeTrailingCommaBytes(&outputBuffer)
+            
+            // Close any open structures if necessary
+            closeOpenStructuresBytes(&indentLevel, &openedStructures, &expectedTypes, indentCache, &outputBuffer, limit: 1)
+            
+            // Add a trailing comma
+            processCommaBytes(indentLevel, indentCache, &outputBuffer)
+          }
+          
+          processOpenBracketBytes(byte, &indentLevel, indentCache, &outputBuffer)
+          openedStructures.append(byte)
+          expectedTypes = [.keyStart, .objectEnd]
+          
+        case 0x5B: // '['
+          if !openedStructures.isEmpty, indentLevel > 0, !expectedTypes.contains(.arrayStart) {
+            removeTrailingCommaBytes(&outputBuffer)
+            
+            // Close any open structures if necessary
+            closeOpenStructuresBytes(&indentLevel, &openedStructures, &expectedTypes, indentCache, &outputBuffer, limit: 1)
+            
+            // Add a trailing comma
+            processCommaBytes(indentLevel, indentCache, &outputBuffer)
+          }
+          
+          processOpenBracketBytes(byte, &indentLevel, indentCache, &outputBuffer)
+          openedStructures.append(byte)
+          
+          valueWillStart = true
+          expectedTypes = [.valueStringStart, .valueNumber, .valueBoolean, .valueNull, .objectStart, .arrayStart, .arrayEnd]
+          
+        case 0x7D: // '}'
+          if expectedTypes.contains(.objectEnd) {
+            removeTrailingCommaBytes(&outputBuffer)
+
+            // Before processing the end of object, see if we've got an open array and close that first
+            if !openedStructures.isEmpty, openedStructures.last == 0x5B { // '['
+              processCloseBracketBytes(0x5D, &indentLevel, indentCache, &outputBuffer) // ']'
+              openedStructures.removeLast()
+            }
+            
+            if !openedStructures.isEmpty, openedStructures.last == 0x7B { // '{'
+              processCloseBracketBytes(byte, &indentLevel, indentCache, &outputBuffer)
+              openedStructures.removeLast()
+            }
+            expectedTypes = [.comma, .objectEnd, .arrayEnd]
+          }
+          
+        case 0x5D: // ']'
+          if expectedTypes.contains(.arrayEnd) {
+            removeTrailingCommaBytes(&outputBuffer)
+
+            // Before processing the end of array, see if we've got an open object and close that first
+            if !openedStructures.isEmpty, openedStructures.last == 0x7B { // '{'
+              processCloseBracketBytes(0x7D, &indentLevel, indentCache, &outputBuffer) // '}'
+              openedStructures.removeLast()
+            }
+            
+            if !openedStructures.isEmpty, openedStructures.last == 0x5B { // '['
+              processCloseBracketBytes(byte, &indentLevel, indentCache, &outputBuffer)
+              openedStructures.removeLast()
+            }
+            expectedTypes = [.comma, .objectEnd, .arrayEnd]
+          }
+          
+        case 0x22: // '"'
+          if expectedTypes.contains(.valueStringStart) {
+            outputBuffer.append(byte)
+            // Found start of string, expect it to end
+            expectedTypes = [.valueStringEnd]
+          } else if !openedStructures.isEmpty, openedStructures.last == 0x7B, expectedTypes.contains(.keyStart) { // '{'
+            outputBuffer.append(byte)
+            expectedTypes = [.keyEnd]
+          }
+          
+        case 0x3A: // ':'
+          if expectedTypes.contains(.colon) {
+            outputBuffer.append(byte)
+            outputBuffer.append(contentsOf: valueSeparationBytes)
+            
+            valueWillStart = true
+            expectedTypes = [.valueStringStart, .valueNumber, .valueBoolean, .valueNull, .objectStart, .arrayStart]
+          }
+          
+        case 0x2C: // ','
+          if expectedTypes.contains(.comma), !expectedTypes.contains(.valueStringEnd) {
+            if valueBeingIgnored {
+              valueBeingIgnored.toggle()
+            } else {
+              processCommaBytes(indentLevel, indentCache, &outputBuffer)
+            }
+            
+            if !openedStructures.isEmpty, openedStructures.last == 0x7B { // '{'
+              // Inside of an object, a comma should be followed by another key and nothing else
+              expectedTypes = [.keyStart]
+            } else {
+              valueWillStart = true
+              expectedTypes = [.keyStart, .valueStringStart, .valueNumber, .valueBoolean, .valueNull, .objectStart, .arrayStart, .arrayEnd]
+            }
+          }
+          
+        default:
+          // Handle unknown characters, could be accumulating a string or looking
+          // to start a new structure
+          
+          if !isWhitespace(byte) {
+            // When we're here, we're not accumulating characters for a string (key or value)
+            // and we haven't encountered any of the known object structures
+            
+            if valueWillStart {
+              valueWillStart = false
+              
+              // We haven't found an a beginning of a string, an array or an object,
+              // the only valid values can now be:
+              // * null
+              // * number
+              // * boolean
+              
+              // If it's neither of these, we're going to assume this is a string with a missing
+              // double quotes and insert it ourselves
+              if expectedTypes.contains(.valueNull), peekBytesMatchUnsafe(bytes, from: currentIndex, match: [0x6E, 0x75, 0x6C, 0x6C]) { // "null"
+                // Handle null
+                outputBuffer.append(contentsOf: [0x6E, 0x75, 0x6C, 0x6C]) // "null"
+                
+                // Advance past "null"
+                currentIndex += 4
+                
+                expectedTypes = [.comma, .objectEnd, .arrayEnd]
+                continue
+              } else if expectedTypes.contains(.valueBoolean), peekBytesMatchUnsafe(bytes, from: currentIndex, match: [0x74, 0x72, 0x75, 0x65]) { // "true"
+                // Handle true
+                outputBuffer.append(contentsOf: [0x74, 0x72, 0x75, 0x65]) // "true"
+                
+                // Advance past "true"
+                currentIndex += 4
+                
+                expectedTypes = [.comma, .objectEnd, .arrayEnd]
+                continue
+              } else if expectedTypes.contains(.valueBoolean), peekBytesMatchUnsafe(bytes, from: currentIndex, match: [0x66, 0x61, 0x6C, 0x73, 0x65]) { // "false"
+                // Handle false
+                outputBuffer.append(contentsOf: [0x66, 0x61, 0x6C, 0x73, 0x65]) // "false"
+                
+                // Advance past "false"
+                currentIndex += 5
+                
+                expectedTypes = [.comma, .objectEnd, .arrayEnd]
+                continue
+              } else if expectedTypes.contains(.valueNumber), isDigit(byte) || byte == 0x2E || byte == 0x2D { // '.' or '-'
+                // Accumulate number
+                outputBuffer.append(byte)
+                
+                // We expect more numbers or a comma (if within an array) or an end of structure
+                expectedTypes = [.valueNumber, .comma, .objectEnd, .arrayEnd]
+              } else {
+                // This is an unknown value, we cannot know where it ends and so
+                // the only sensible thing to do is to add a `null` and then wait for it to end
+                outputBuffer.append(contentsOf: [0x6E, 0x75, 0x6C, 0x6C]) // "null"
+                
+                valueBeingIgnored = true
+                
+                // We expect to end the string
+                expectedTypes = [.comma, .objectEnd, .arrayEnd]
+              }
+            } else if expectedTypes.contains(.valueNumber) {
+              // Accumulate number
+              outputBuffer.append(byte)
+              
+              // We expect more numbers or a comma (if within an array) or an end of structure
+              expectedTypes = [.valueNumber, .comma, .objectEnd, .arrayEnd]
+            }
+          }
+      }
+      
+      currentIndex += 1
+    }
+    
+    // If we're still expecting a string end, close the string
+    if expectedTypes.contains(.valueStringEnd) || expectedTypes.contains(.keyEnd) {
+      outputBuffer.append(0x22) // '"'
+    }
+    
+    // Close any remaining open structures
+    closeOpenStructuresBytes(&indentLevel, &openedStructures, &expectedTypes, indentCache, &outputBuffer)
+    
+    return String(bytes: outputBuffer, encoding: .utf8) ?? ""
+  }
+  
+  /// Peeks ahead to check if bytes match a specific sequence (unsafe version)
+  private static func peekBytesMatchUnsafe(_ bytes: UnsafeBufferPointer<UInt8>, from index: Int, match pattern: [UInt8]) -> Bool {
+    guard index + pattern.count <= bytes.count else { return false }
+    
+    for i in 0..<pattern.count {
+      let byte = bytes[index + i]
+      let expectedByte = pattern[i]
+      // Case-insensitive comparison for ASCII letters
+      let normalizedByte = (byte >= 0x41 && byte <= 0x5A) ? byte + 0x20 : byte
+      let normalizedExpected = (expectedByte >= 0x41 && expectedByte <= 0x5A) ? expectedByte + 0x20 : expectedByte
+      if normalizedByte != normalizedExpected {
+        return false
+      }
+    }
+    return true
+  }
+  
   /// Internal method: Sanitizes and formats JSON using byte-level processing for optimal performance
   /// - Parameters:
   ///   - bytes: The input JSON as UTF-8 bytes, potentially malformed
@@ -990,14 +1299,35 @@ extension SwiftJSONSanitizer {
 
   // MARK: - Byte-level Helper Functions
   
-  /// Checks if a UTF-8 byte represents whitespace
+  /// Lookup table for fast whitespace detection (256 bytes, true for whitespace characters)
+  private static let whitespaceTable: [Bool] = {
+    var table = [Bool](repeating: false, count: 256)
+    table[0x20] = true // space
+    table[0x09] = true // tab
+    table[0x0A] = true // newline
+    table[0x0D] = true // carriage return
+    return table
+  }()
+  
+  /// Checks if a UTF-8 byte represents whitespace using lookup table
+  @inline(__always)
   private static func isWhitespace(_ byte: UInt8) -> Bool {
-    return byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D // space, tab, newline, carriage return
+    return whitespaceTable[Int(byte)]
   }
   
-  /// Checks if a UTF-8 byte represents a digit
+  /// Lookup table for fast digit detection
+  private static let digitTable: [Bool] = {
+    var table = [Bool](repeating: false, count: 256)
+    for i in 0x30...0x39 { // '0' to '9'
+      table[i] = true
+    }
+    return table
+  }()
+  
+  /// Checks if a UTF-8 byte represents a digit using lookup table
+  @inline(__always)
   private static func isDigit(_ byte: UInt8) -> Bool {
-    return byte >= 0x30 && byte <= 0x39 // '0' to '9'
+    return digitTable[Int(byte)]
   }
   
   /// Peeks ahead to check if bytes match a specific sequence
@@ -1038,11 +1368,13 @@ extension SwiftJSONSanitizer {
     }
   }
   
-  /// Processes an opening bracket or brace (byte version)
+  /// Processes an opening bracket or brace (byte version) with optimized batch append
+  @inline(__always)
   private static func processOpenBracketBytes(_ bracket: UInt8, _ indentLevel: inout Int, _ indentCache: IndentationCache, _ buffer: inout ContiguousArray<UInt8>) {
     indentLevel += 1
     buffer.append(bracket)
-    buffer.append(contentsOf: indentCache.getIndentation(level: indentLevel))
+    let indent = indentCache.getIndentation(level: indentLevel)
+    buffer.append(contentsOf: indent)
   }
   
   /// Processes a closing bracket or brace (byte version)
