@@ -251,7 +251,8 @@ public struct SwiftJSONSanitizer {
       if startingStructure == 0x7B { // '{'
         expectedTypes = [.keyStart, .objectEnd]
       } else if startingStructure == 0x5B { // '['
-        expectedTypes = [.keyStart, .arrayEnd]
+        valueWillStart = true
+        expectedTypes = [.valueStringStart, .valueNumber, .valueBoolean, .valueNull, .objectStart, .arrayStart, .arrayEnd]
       } else {
         valueWillStart = true
         expectedTypes = [.valueStringStart, .valueNumber, .valueBoolean, .valueNull, .objectStart, .arrayStart, .arrayEnd]
@@ -371,7 +372,33 @@ public struct SwiftJSONSanitizer {
         case 0x2C: // ','
           if expectedTypes.contains(.comma), !expectedTypes.contains(.valueStringEnd) {
             if valueBeingIgnored {
-              valueBeingIgnored.toggle()
+              var lookaheadIndex = currentIndex + 1
+              while lookaheadIndex < bytes.count, isWhitespace(bytes[lookaheadIndex]) {
+                lookaheadIndex += 1
+              }
+              
+              if lookaheadIndex >= bytes.count {
+                valueBeingIgnored = false
+                currentIndex += 1
+                continue
+              }
+              
+              let nextByte = bytes[lookaheadIndex]
+              if nextByte == 0x7D || nextByte == 0x5D { // '}' or ']'
+                valueBeingIgnored = false
+                currentIndex += 1
+                continue
+              }
+              
+              let isNextValueStart = nextByte == 0x22 || nextByte == 0x7B || nextByte == 0x5B || isDigit(nextByte) || nextByte == 0x74 || nextByte == 0x66 || nextByte == 0x6E || nextByte == 0x2D
+              
+              if !isNextValueStart {
+                currentIndex += 1
+                continue
+              }
+              
+              valueBeingIgnored = false
+              processCommaBytes(indentLevel, indentCache, &outputBuffer)
             } else {
               processCommaBytes(indentLevel, indentCache, &outputBuffer)
             }
@@ -557,7 +584,8 @@ public struct SwiftJSONSanitizer {
       if startingStructure == 0x7B { // '{'
         expectedTypes = [.keyStart, .objectEnd]
       } else if startingStructure == 0x5B { // '['
-        expectedTypes = [.keyStart, .arrayEnd]
+        valueWillStart = true
+        expectedTypes = [.valueStringStart, .valueNumber, .valueBoolean, .valueNull, .objectStart, .arrayStart, .arrayEnd]
       } else {
         valueWillStart = true
         expectedTypes = [.valueStringStart, .valueNumber, .valueBoolean, .valueNull, .objectStart, .arrayStart, .arrayEnd]
@@ -677,7 +705,33 @@ public struct SwiftJSONSanitizer {
         case 0x2C: // ','
           if expectedTypes.contains(.comma), !expectedTypes.contains(.valueStringEnd) {
             if valueBeingIgnored {
-              valueBeingIgnored.toggle()
+              var lookaheadIndex = currentIndex + 1
+              while lookaheadIndex < bytes.count, isWhitespace(bytes[lookaheadIndex]) {
+                lookaheadIndex += 1
+              }
+              
+              if lookaheadIndex >= bytes.count {
+                valueBeingIgnored = false
+                currentIndex += 1
+                continue
+              }
+              
+              let nextByte = bytes[lookaheadIndex]
+              if nextByte == 0x7D || nextByte == 0x5D { // '}' or ']'
+                valueBeingIgnored = false
+                currentIndex += 1
+                continue
+              }
+              
+              let isNextValueStart = nextByte == 0x22 || nextByte == 0x7B || nextByte == 0x5B || isDigit(nextByte) || nextByte == 0x74 || nextByte == 0x66 || nextByte == 0x6E || nextByte == 0x2D
+              
+              if !isNextValueStart {
+                currentIndex += 1
+                continue
+              }
+              
+              valueBeingIgnored = false
+              processCommaBytes(indentLevel, indentCache, &outputBuffer)
             } else {
               processCommaBytes(indentLevel, indentCache, &outputBuffer)
             }

@@ -220,6 +220,18 @@ final class SwiftJSONSanitizerTests: XCTestCase {
     XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
   }
   
+  func testMissingOpeningBracket() {
+    let input = "1,2,3]]"
+    let expected = """
+    [
+      1,
+      2,
+      3
+    ]
+    """
+    XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
+  }
+  
   func testUnbalancedMixOfBracketsAndBraces() {
     let input = "{\"data\": [{\"key\": 1}, {\"another\": 2]}"
     let expected = """
@@ -273,6 +285,32 @@ final class SwiftJSONSanitizerTests: XCTestCase {
     """
     let result = SwiftJSONSanitizer.sanitize(input)
     XCTAssertEqual(result, expected)
+  }
+  
+  func testCaseInsensitiveLiterals() {
+    let input = "{\"flag\": TRUE, \"other\": FALSE, \"value\": NuLl}"
+    let expected = """
+    {
+      "flag": true,
+      "other": false,
+      "value": null
+    }
+    """
+    XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
+  }
+  
+  func testNumberFormats() {
+    let input = "{\"values\": [-12.34e+10, 0.001, 42]}"
+    let expected = """
+    {
+      "values": [
+        -12.34e+10,
+        0.001,
+        42
+      ]
+    }
+    """
+    XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
   }
   
   func testCommaInString() {
@@ -439,6 +477,14 @@ final class SwiftJSONSanitizerTests: XCTestCase {
     XCTAssertEqual(SwiftJSONSanitizer.sanitize(input, options: options), expected)
   }
   
+  func testCustomFormattingWindowsStyle() {
+    let input = "{\"key\": \"value\"}"
+    let options = SwiftJSONSanitizer.Options(indentChar: "\t", newLineChar: "\r\n", valueSeparationChar: "")
+    let expected = "{\r\n\t\"key\":\"value\"\r\n}"
+
+    XCTAssertEqual(SwiftJSONSanitizer.sanitize(input, options: options), expected)
+  }
+  
   func testMalformedJSONRecovery() {
     let input = "{\"key\":{\"key1\": true}, \"key2\":{\"key2\": false}"
     let expected = """
@@ -492,6 +538,23 @@ final class SwiftJSONSanitizerTests: XCTestCase {
     """
     
     XCTAssertEqual(SwiftJSONSanitizer.sanitize(input, options: .minify), SwiftJSONSanitizer.sanitize(expected, options: .minify))
+  }
+  
+  func testArrayValueSanitization() {
+    let input = """
+    {"items":["first",<html>broken</html>,"third"]}
+    """
+    let expected = """
+    {
+      "items": [
+        "first",
+        null,
+        "third"
+      ]
+    }
+    """
+
+    XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
   }
   
   func testLargeJSONPerformance() {
