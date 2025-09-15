@@ -502,13 +502,12 @@ public struct SwiftJSONSanitizer {
   private static func peekBytesMatchUnsafe(_ bytes: UnsafeBufferPointer<UInt8>, from index: Int, match pattern: [UInt8]) -> Bool {
     guard index + pattern.count <= bytes.count else { return false }
     
-    for i in 0..<pattern.count {
-      let byte = bytes[index + i]
-      let expectedByte = pattern[i]
-      // Case-insensitive comparison for ASCII letters
-      let normalizedByte = (byte >= 0x41 && byte <= 0x5A) ? byte + 0x20 : byte
-      let normalizedExpected = (expectedByte >= 0x41 && expectedByte <= 0x5A) ? expectedByte + 0x20 : expectedByte
-      if normalizedByte != normalizedExpected {
+    for offset in 0..<pattern.count {
+      var byte = bytes[index + offset]
+      if byte >= 0x41 && byte <= 0x5A { // Convert uppercase ASCII to lowercase
+        byte &+= 0x20
+      }
+      if byte != pattern[offset] {
         return false
       }
     }
@@ -1388,13 +1387,12 @@ extension SwiftJSONSanitizer {
   private static func peekBytesMatch(_ bytes: [UInt8], from index: Int, match pattern: [UInt8]) -> Bool {
     guard index + pattern.count <= bytes.count else { return false }
     
-    for i in 0..<pattern.count {
-      let byte = bytes[index + i]
-      let expectedByte = pattern[i]
-      // Case-insensitive comparison for ASCII letters
-      let normalizedByte = (byte >= 0x41 && byte <= 0x5A) ? byte + 0x20 : byte
-      let normalizedExpected = (expectedByte >= 0x41 && expectedByte <= 0x5A) ? expectedByte + 0x20 : expectedByte
-      if normalizedByte != normalizedExpected {
+    for offset in 0..<pattern.count {
+      var byte = bytes[index + offset]
+      if byte >= 0x41 && byte <= 0x5A { // Convert uppercase ASCII to lowercase
+        byte &+= 0x20
+      }
+      if byte != pattern[offset] {
         return false
       }
     }
