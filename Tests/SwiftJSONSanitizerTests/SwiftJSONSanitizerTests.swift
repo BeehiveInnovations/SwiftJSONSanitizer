@@ -8,6 +8,17 @@ import Foundation
 @testable import SwiftJSONSanitizer
 
 final class SwiftJSONSanitizerTests: XCTestCase {
+  /// Parses `jsonString` using `JSONSerialization` and returns the JSON object.
+  /// - Parameter jsonString: A JSON string (object/array or fragments).
+  /// - Returns: The deserialized JSON object.
+  private func jsonObject(from jsonString: String) throws -> Any {
+    guard let data = jsonString.data(using: .utf8) else {
+      throw NSError(domain: "SwiftJSONSanitizerTests", code: 1)
+    }
+
+    return try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+  }
+
   func testValidJSON() {
     let input = "{\"key\": [11, 12, 13]}"
     let expected = """
@@ -555,6 +566,79 @@ final class SwiftJSONSanitizerTests: XCTestCase {
     """
 
     XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
+  }
+
+  func testArrayValueSanitization_CaseInsensitiveLiteralAfterIgnoredValue() {
+    let input = """
+    {"items":[<html>broken</html>,TRUE]}
+    """
+    let expected = """
+    {
+      "items": [
+        null,
+        true
+      ]
+    }
+    """
+
+    XCTAssertEqual(SwiftJSONSanitizer.sanitize(input), expected)
+  }
+
+  func testMissingEndQuoteWithTrailingBackslash_ObjectValue() throws {
+    let input = #"{"key":"abc\"#
+
+    let sanitized = SwiftJSONSanitizer.sanitize(input, options: .minify)
+
+    let json = try jsonObject(from: sanitized)
+    guard let dict = json as? [String: Any] else {
+      XCTFail("Expected dictionary JSON")
+      return
+    }
+
+    XCTAssertEqual(dict["key"] as? String, "abc\\")
+  }
+
+  func testMissingEndQuoteWithTrailingBackslash_ArrayValue() throws {
+    let input = #"["abc\"#
+
+    let sanitized = SwiftJSONSanitizer.sanitize(input, options: .minify)
+
+    let json = try jsonObject(from: sanitized)
+    guard let array = json as? [Any] else {
+      XCTFail("Expected array JSON")
+      return
+    }
+
+    XCTAssertEqual(array.count, 1)
+    XCTAssertEqual(array.first as? String, "abc\\")
+  }
+
+  func testUTF8BOMAtStartIsIgnored() throws {
+    let input = "\u{feff}{\"key\": 1}"
+
+    let sanitized = SwiftJSONSanitizer.sanitize(input, options: .minify)
+
+    let json = try jsonObject(from: sanitized)
+    guard let dict = json as? [String: Any] else {
+      XCTFail("Expected dictionary JSON")
+      return
+    }
+
+    XCTAssertEqual(dict["key"] as? Int, 1)
+  }
+
+  func testUnicodeStringPreserved() throws {
+    let input = #"{"emoji":"😃"}"#
+
+    let sanitized = SwiftJSONSanitizer.sanitize(input, options: .minify)
+
+    let json = try jsonObject(from: sanitized)
+    guard let dict = json as? [String: Any] else {
+      XCTFail("Expected dictionary JSON")
+      return
+    }
+
+    XCTAssertEqual(dict["emoji"] as? String, "😃")
   }
   
   func testLargeJSONPerformance() {

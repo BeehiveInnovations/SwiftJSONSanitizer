@@ -96,7 +96,7 @@ public struct SwiftJSONSanitizer {
       return [.valueStringStart, .valueNumber, .valueBoolean, .valueNull]
     }
   }
-
+  
   /// Fast bitmask-based OptionSet for expected tokens (performance optimization)
   private struct ExpectedTokens: OptionSet {
     let rawValue: UInt16
@@ -118,7 +118,7 @@ public struct SwiftJSONSanitizer {
     
     static let allValueTypes: ExpectedTokens = [.valueStringStart, .valueNumber, .valueBoolean, .valueNull]
   }
-
+  
   /// Pre-computed indentation cache for performance optimization
   private struct IndentationCache {
     private let newLineBytes: [UInt8]
@@ -167,6 +167,60 @@ public struct SwiftJSONSanitizer {
       return newLineBytes
     }
   }
+
+  /// Precomputed UTF-8 formatting bytes and indentation cache for a given `Options`.
+  ///
+  /// Notes:
+  /// - Uses shared static caches for common formats (e.g. `.prettyPrint`) to avoid per-call allocations.
+  private struct FormattingBytes {
+    let valueSeparationBytes: [UInt8]
+    let indentCache: IndentationCache
+  }
+
+  private static let cachedPrettyValueSeparationBytes = Array(Options.prettyPrint.valueSeparationChar.utf8)
+  private static let cachedPrettyIndentBytes = Array(Options.prettyPrint.indentChar.utf8)
+  private static let cachedPrettyNewLineBytes = Array(Options.prettyPrint.newLineChar.utf8)
+  private static let cachedPrettyIndentCache = IndentationCache(
+    indentBytes: cachedPrettyIndentBytes,
+    newLineBytes: cachedPrettyNewLineBytes
+  )
+
+  private static let cachedEmptyIndentCache = IndentationCache(indentBytes: [], newLineBytes: [])
+
+  /// Returns byte-level formatting state derived from `options`.
+  ///
+  /// - Parameter options: Formatting options for output JSON.
+  /// - Returns: UTF-8 bytes for value separation and a (possibly shared) indentation cache.
+  private static func formattingBytes(for options: Options) -> FormattingBytes {
+    if options.indentChar == Options.prettyPrint.indentChar,
+       options.newLineChar == Options.prettyPrint.newLineChar,
+       options.valueSeparationChar == Options.prettyPrint.valueSeparationChar {
+      return FormattingBytes(
+        valueSeparationBytes: cachedPrettyValueSeparationBytes,
+        indentCache: cachedPrettyIndentCache
+      )
+    }
+
+    if options.indentChar.isEmpty, options.newLineChar.isEmpty {
+      if options.valueSeparationChar.isEmpty {
+        return FormattingBytes(valueSeparationBytes: [], indentCache: cachedEmptyIndentCache)
+      }
+
+      return FormattingBytes(
+        valueSeparationBytes: Array(options.valueSeparationChar.utf8),
+        indentCache: cachedEmptyIndentCache
+      )
+    }
+
+    let indentBytes = Array(options.indentChar.utf8)
+    let newLineBytes = Array(options.newLineChar.utf8)
+    let valueSeparationBytes = Array(options.valueSeparationChar.utf8)
+
+    return FormattingBytes(
+      valueSeparationBytes: valueSeparationBytes,
+      indentCache: IndentationCache(indentBytes: indentBytes, newLineBytes: newLineBytes)
+    )
+  }
   
   /// Sanitizes and formats the input JSON string using optimized byte-level processing
   /// - Parameters:
@@ -200,14 +254,18 @@ public struct SwiftJSONSanitizer {
     var expectedTypes: ExpectedTokens = [.objectStart, .arrayStart]
     var openedStructures = [UInt8]()
     
-    // Convert options to UTF-8 bytes for faster processing
-    let indentBytes = Array(options.indentChar.utf8)
-    let newLineBytes = Array(options.newLineChar.utf8)
-    let valueSeparationBytes = Array(options.valueSeparationChar.utf8)
+    let formatting = formattingBytes(for: options)
+    let valueSeparationBytes = formatting.valueSeparationBytes
+    let indentCache = formatting.indentCache
     
-    // Create indentation cache for performance
-    let indentCache = IndentationCache(indentBytes: indentBytes, newLineBytes: newLineBytes)
-    
+    // Skip UTF-8 BOM if present.
+    if bytes.count >= 3,
+       bytes[0] == 0xEF,
+       bytes[1] == 0xBB,
+       bytes[2] == 0xBF {
+      currentIndex = 3
+    }
+
     // Skip leading whitespace
     while currentIndex < bytes.count && isWhitespace(bytes[currentIndex]) {
       currentIndex += 1
@@ -319,7 +377,7 @@ public struct SwiftJSONSanitizer {
         case 0x7D: // '}'
           if expectedTypes.contains(.objectEnd) {
             removeTrailingCommaBytes(&outputBuffer)
-
+            
             // Before processing the end of object, see if we've got an open array and close that first
             if !openedStructures.isEmpty, openedStructures.last == 0x5B { // '['
               processCloseBracketBytes(0x5D, &indentLevel, indentCache, &outputBuffer) // ']'
@@ -336,7 +394,7 @@ public struct SwiftJSONSanitizer {
         case 0x5D: // ']'
           if expectedTypes.contains(.arrayEnd) {
             removeTrailingCommaBytes(&outputBuffer)
-
+            
             // Before processing the end of array, see if we've got an open object and close that first
             if !openedStructures.isEmpty, openedStructures.last == 0x7B { // '{'
               processCloseBracketBytes(0x7D, &indentLevel, indentCache, &outputBuffer) // '}'
@@ -390,7 +448,30 @@ public struct SwiftJSONSanitizer {
                 continue
               }
               
-              let isNextValueStart = nextByte == 0x22 || nextByte == 0x7B || nextByte == 0x5B || isDigit(nextByte) || nextByte == 0x74 || nextByte == 0x66 || nextByte == 0x6E || nextByte == 0x2D
+              let isNextValueStart: Bool
+              if !openedStructures.isEmpty, openedStructures.last == 0x7B { // '{' (object expects a quoted key)
+                isNextValueStart = nextByte == 0x22 // '"'
+              }
+              else {
+                if nextByte == 0x22 || nextByte == 0x7B || nextByte == 0x5B { // '"', '{', '['
+                  isNextValueStart = true
+                }
+                else if isDigit(nextByte) || nextByte == 0x2D || nextByte == 0x2E { // digit, '-', '.'
+                  isNextValueStart = true
+                }
+                else if nextByte == 0x74 || nextByte == 0x54 { // t/T
+                  isNextValueStart = peekBytesMatchUnsafe(bytes, from: lookaheadIndex, match: [0x74, 0x72, 0x75, 0x65]) // "true"
+                }
+                else if nextByte == 0x66 || nextByte == 0x46 { // f/F
+                  isNextValueStart = peekBytesMatchUnsafe(bytes, from: lookaheadIndex, match: [0x66, 0x61, 0x6C, 0x73, 0x65]) // "false"
+                }
+                else if nextByte == 0x6E || nextByte == 0x4E { // n/N
+                  isNextValueStart = peekBytesMatchUnsafe(bytes, from: lookaheadIndex, match: [0x6E, 0x75, 0x6C, 0x6C]) // "null"
+                }
+                else {
+                  isNextValueStart = false
+                }
+              }
               
               if !isNextValueStart {
                 currentIndex += 1
@@ -489,13 +570,16 @@ public struct SwiftJSONSanitizer {
     
     // If we're still expecting a string end, close the string
     if expectedTypes.contains(.valueStringEnd) || expectedTypes.contains(.keyEnd) {
+      if escaping {
+        outputBuffer.append(0x5C) // '\'
+      }
       outputBuffer.append(0x22) // '"'
     }
     
     // Close any remaining open structures
     closeOpenStructuresBytes(&indentLevel, &openedStructures, &expectedTypes, indentCache, &outputBuffer)
     
-    return String(bytes: outputBuffer, encoding: .utf8) ?? ""
+    return String(decoding: outputBuffer, as: UTF8.self)
   }
   
   /// Peeks ahead to check if bytes match a specific sequence (unsafe version)
@@ -537,14 +621,18 @@ public struct SwiftJSONSanitizer {
     var expectedTypes: ExpectedTokens = [.objectStart, .arrayStart]
     var openedStructures = [UInt8]()
     
-    // Convert options to UTF-8 bytes for faster processing
-    let indentBytes = Array(options.indentChar.utf8)
-    let newLineBytes = Array(options.newLineChar.utf8)
-    let valueSeparationBytes = Array(options.valueSeparationChar.utf8)
+    let formatting = formattingBytes(for: options)
+    let valueSeparationBytes = formatting.valueSeparationBytes
+    let indentCache = formatting.indentCache
     
-    // Create indentation cache for performance
-    let indentCache = IndentationCache(indentBytes: indentBytes, newLineBytes: newLineBytes)
-    
+    // Skip UTF-8 BOM if present.
+    if bytes.count >= 3,
+       bytes[0] == 0xEF,
+       bytes[1] == 0xBB,
+       bytes[2] == 0xBF {
+      currentIndex = 3
+    }
+
     // Skip leading whitespace
     while currentIndex < bytes.count, isWhitespace(bytes[currentIndex]) {
       currentIndex += 1
@@ -651,7 +739,7 @@ public struct SwiftJSONSanitizer {
         case 0x7D: // '}'
           if expectedTypes.contains(.objectEnd) {
             removeTrailingCommaBytes(&outputBuffer)
-
+            
             // Before processing the end of object, see if we've got an open array and close that first
             if !openedStructures.isEmpty, openedStructures.last == 0x5B { // '['
               processCloseBracketBytes(0x5D, &indentLevel, indentCache, &outputBuffer) // ']'
@@ -668,7 +756,7 @@ public struct SwiftJSONSanitizer {
         case 0x5D: // ']'
           if expectedTypes.contains(.arrayEnd) {
             removeTrailingCommaBytes(&outputBuffer)
-
+            
             // Before processing the end of array, see if we've got an open object and close that first
             if !openedStructures.isEmpty, openedStructures.last == 0x7B { // '{'
               processCloseBracketBytes(0x7D, &indentLevel, indentCache, &outputBuffer) // '}'
@@ -722,7 +810,30 @@ public struct SwiftJSONSanitizer {
                 continue
               }
               
-              let isNextValueStart = nextByte == 0x22 || nextByte == 0x7B || nextByte == 0x5B || isDigit(nextByte) || nextByte == 0x74 || nextByte == 0x66 || nextByte == 0x6E || nextByte == 0x2D
+              let isNextValueStart: Bool
+              if !openedStructures.isEmpty, openedStructures.last == 0x7B { // '{' (object expects a quoted key)
+                isNextValueStart = nextByte == 0x22 // '"'
+              }
+              else {
+                if nextByte == 0x22 || nextByte == 0x7B || nextByte == 0x5B { // '"', '{', '['
+                  isNextValueStart = true
+                }
+                else if isDigit(nextByte) || nextByte == 0x2D || nextByte == 0x2E { // digit, '-', '.'
+                  isNextValueStart = true
+                }
+                else if nextByte == 0x74 || nextByte == 0x54 { // t/T
+                  isNextValueStart = peekBytesMatch(bytes, from: lookaheadIndex, match: [0x74, 0x72, 0x75, 0x65]) // "true"
+                }
+                else if nextByte == 0x66 || nextByte == 0x46 { // f/F
+                  isNextValueStart = peekBytesMatch(bytes, from: lookaheadIndex, match: [0x66, 0x61, 0x6C, 0x73, 0x65]) // "false"
+                }
+                else if nextByte == 0x6E || nextByte == 0x4E { // n/N
+                  isNextValueStart = peekBytesMatch(bytes, from: lookaheadIndex, match: [0x6E, 0x75, 0x6C, 0x6C]) // "null"
+                }
+                else {
+                  isNextValueStart = false
+                }
+              }
               
               if !isNextValueStart {
                 currentIndex += 1
@@ -821,15 +932,18 @@ public struct SwiftJSONSanitizer {
     
     // If we're still expecting a string end, close the string
     if expectedTypes.contains(.valueStringEnd) || expectedTypes.contains(.keyEnd) {
+      if escaping {
+        outputBuffer.append(0x5C) // '\'
+      }
       outputBuffer.append(0x22) // '"'
     }
     
     // Close any remaining open structures
     closeOpenStructuresBytes(&indentLevel, &openedStructures, &expectedTypes, indentCache, &outputBuffer)
     
-    return String(bytes: outputBuffer, encoding: .utf8) ?? ""
+    return String(decoding: outputBuffer, as: UTF8.self)
   }
-
+  
   /// Original string-based sanitization method (kept for compatibility/comparison)
   /// - Parameters:
   ///   - json: The input JSON string, potentially malformed
@@ -916,11 +1030,11 @@ public struct SwiftJSONSanitizer {
       
       switch char {
         case ExpectedType.objectStart.char():
-		  if expectedTypes.contains(.valueStringEnd) {
-			  formatted.append(char)
-			  break
-		  }
-
+          if expectedTypes.contains(.valueStringEnd) {
+            formatted.append(char)
+            break
+          }
+          
           if !openedStructures.isEmpty, indentLevel > 0, !expectedTypes.contains(.arrayStart) {
             removeTrailingComma(&formatted)
             
@@ -936,12 +1050,12 @@ public struct SwiftJSONSanitizer {
           expectedTypes = [.keyStart, .objectEnd]
           
         case ExpectedType.arrayStart.char():
-		  if expectedTypes.contains(.valueStringEnd) {
-			  formatted.append(char)
-			  break
-		  }
-		  
-		  if !openedStructures.isEmpty, indentLevel > 0, !expectedTypes.contains(.arrayStart) {
+          if expectedTypes.contains(.valueStringEnd) {
+            formatted.append(char)
+            break
+          }
+          
+          if !openedStructures.isEmpty, indentLevel > 0, !expectedTypes.contains(.arrayStart) {
             removeTrailingComma(&formatted)
             
             // Close any open structures if necessary
@@ -966,14 +1080,14 @@ public struct SwiftJSONSanitizer {
             .arrayEnd
           ]
         case ExpectedType.objectEnd.char():
-		  if expectedTypes.contains(.valueStringEnd) {
-			  formatted.append(char)
-			  break
-		  }
-
+          if expectedTypes.contains(.valueStringEnd) {
+            formatted.append(char)
+            break
+          }
+          
           if expectedTypes.contains(.objectEnd) {
             removeTrailingComma(&formatted)
-
+            
             // Before processing the end of object, see if we've got an open array and close that first
             if !openedStructures.isEmpty, openedStructures.last == ExpectedType.arrayStart.char() {
               processCloseBracket(ExpectedType.arrayEnd.char(), &indentLevel, options, &formatted)
@@ -988,14 +1102,14 @@ public struct SwiftJSONSanitizer {
           }
           
         case ExpectedType.arrayEnd.char():
-		  if expectedTypes.contains(.valueStringEnd) {
-			  formatted.append(char)
-			  break
-		  }
-
+          if expectedTypes.contains(.valueStringEnd) {
+            formatted.append(char)
+            break
+          }
+          
           if expectedTypes.contains(.arrayEnd) {
             removeTrailingComma(&formatted)
-
+            
             // Before processing the end of array, see if we've got an open object and close that first
             if !openedStructures.isEmpty, openedStructures.last == ExpectedType.objectStart.char() {
               processCloseBracket(ExpectedType.objectEnd.char(), &indentLevel, options, &formatted)
@@ -1011,7 +1125,7 @@ public struct SwiftJSONSanitizer {
         case ExpectedType.doubleQuotes.char():
           if expectedTypes.contains(.keyEnd) {
             formatted.append(char)
-
+            
             if escaping {
               // this quote is being escaped, we haven't ended yet
               escaping = false
@@ -1023,34 +1137,34 @@ public struct SwiftJSONSanitizer {
           else if expectedTypes.contains(.valueStringStart) {
             formatted.append(char)
             openedStructures.append(char)
-
+            
             // Found start of string, expect it to end
             expectedTypes = [.valueStringEnd]
           }
           else if expectedTypes.contains(.valueStringEnd) {
             formatted.append(char)
-
+            
             if escaping {
               // quote within the value is being escaped, we haven't ended yet
               escaping = false
             }
             else {
               // Expect a comma for more strings in an array, or a } or ]
-			  openedStructures.removeLast()
+              openedStructures.removeLast()
               expectedTypes = [.comma, .objectEnd, .arrayEnd]
             }
           }
           else if !openedStructures.isEmpty, openedStructures.last == ExpectedType.objectStart.char(), expectedTypes.contains(.keyStart) {
             formatted.append(char)
-
+            
             expectedTypes = [.keyEnd]
           }
         case ExpectedType.colon.char():
-		  if expectedTypes.contains(.valueStringEnd) {
-			  formatted.append(char)
-			  break
-		  }
-
+          if expectedTypes.contains(.valueStringEnd) {
+            formatted.append(char)
+            break
+          }
+          
           if expectedTypes.contains(.colon) {
             formatted.append(ExpectedType.colon.char())
             formatted.append(options.valueSeparationChar)
@@ -1067,11 +1181,11 @@ public struct SwiftJSONSanitizer {
             ]
           }
         case ExpectedType.comma.char():
-		  if expectedTypes.contains(.valueStringEnd) {
-			  formatted.append(char)
-			  break
-		  }
-
+          if expectedTypes.contains(.valueStringEnd) {
+            formatted.append(char)
+            break
+          }
+          
           if expectedTypes.contains(.comma) {
             if valueBeingIgnored {
               valueBeingIgnored.toggle()
@@ -1303,7 +1417,7 @@ extension SwiftJSONSanitizer {
   private static func processCloseString(_ formatted: inout StringBuilder) {
     formatted.append(ExpectedType.valueStringEnd.char())
   }
-
+  
   /// Processes a comma
   /// - Parameters:
   ///   - indentLevel: The current indentation level
@@ -1349,7 +1463,7 @@ extension SwiftJSONSanitizer {
     // After closing structures, we expect either the end of input, a comma, or more closing brackets
     expectedTypes = openedStructures.isEmpty ? [.comma] : [.comma, .objectEnd, .arrayEnd]
   }
-
+  
   // MARK: - Byte-level Helper Functions
   
   /// Lookup table for fast whitespace detection (256 bytes, true for whitespace characters)
@@ -1401,6 +1515,10 @@ extension SwiftJSONSanitizer {
   
   /// Removes any trailing commas from the output buffer
   private static func removeTrailingCommaBytes(_ buffer: inout ContiguousArray<UInt8>) {
+    if buffer.isEmpty {
+      return
+    }
+
     // Find last non-whitespace byte
     var lastNonWhitespaceIndex: Int?
     for i in stride(from: buffer.count - 1, through: 0, by: -1) {
@@ -1487,7 +1605,7 @@ extension String {
     let endIndex = self.index(index, offsetBy: word.count, limitedBy: self.endIndex) ?? self.endIndex
     return self[index..<endIndex].lowercased() == word.lowercased()
   }
-    
+  
   /// Peek ahead to check if the next characters form a number (supports `Int` index).
   func peekNumber(aheadFrom intIndex: Int) -> Double? {
     // Validate the intIndex
